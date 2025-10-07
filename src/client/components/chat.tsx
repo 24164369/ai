@@ -152,7 +152,7 @@ const Chat = () => {
         if (conversation.title === "New Chat" && messages.length > 0) {
           const firstUserMessage = messages.find((m) => m.role === "user");
           if (firstUserMessage) {
-            const textPart = firstUserMessage.parts.find((p: any) => p.type === "text");
+            const textPart = firstUserMessage.parts.find((p): p is { type: "text"; text: string } => p.type === "text");
             if (textPart) {
               conversation.title = generateChatTitle(textPart.text);
             }
@@ -185,8 +185,8 @@ const Chat = () => {
       if (uploadedImages.length > 0) {
         uploadedImages.forEach((img) => {
           parts.push({
-            type: "image",
-            image: img, // base64 data URL
+            type: "file",
+            file: img, // base64 data URL
           });
         });
       }
@@ -328,6 +328,8 @@ const Chat = () => {
               return part.text;
             } else if (part.type === "reasoning") {
               return `**Reasoning:**\n${part.text}`;
+            } else if (part.type === "file") {
+              return "[Image]";
             }
             return "";
           })
@@ -464,11 +466,11 @@ const Chat = () => {
                       <MessageContent>
                         {message.parts.map((part, i) => {
                           switch (part.type) {
-                            case "image":
+                            case "file":
                               return (
                                 <div key={`${message.id}-${i}`} className="mb-3">
                                   <img
-                                    src={(part as any).image}
+                                    src={(part as any).file}
                                     alt={`Image ${i + 1}`}
                                     className="max-w-sm rounded-lg border shadow-sm"
                                   />
