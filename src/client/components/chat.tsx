@@ -14,10 +14,9 @@ import {
   PromptInputToolbar,
   PromptInputTools,
 } from "@/client/components/ai-elements/prompt-input";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useChat } from "@ai-sdk/react";
 import { Response } from "@/client/components/ai-elements/response";
-
 import {
   Reasoning,
   ReasoningContent,
@@ -47,8 +46,20 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/client/components/ui/tooltip";
-import { Check, ChevronsUpDown, Plus, Download } from "lucide-react";
+import { Check, ChevronsUpDown, Download, ImagePlus, X } from "lucide-react";
 import { cn } from "@/client/lib/utils";
+import { ChatSidebar } from "@/client/components/chat-sidebar";
+import {
+  getAllConversations,
+  getConversation,
+  saveConversation,
+  deleteConversation,
+  createNewConversation,
+  getActiveConversationId,
+  setActiveConversationId,
+  generateChatTitle,
+  type ChatConversation,
+} from "@/client/lib/chat-storage";
 
 type Body = {
   model: string;
@@ -58,6 +69,12 @@ const Chat = () => {
   const [input, setInput] = useState("");
   const [model, setModel] = useState<string>("");
   const [open, setOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [conversations, setConversations] = useState<ChatConversation[]>([]);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [uploadedImages, setUploadedImages] = useState<string[]>([]);
+  const [isDragging, setIsDragging] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const {
     data: models = [],
@@ -65,6 +82,18 @@ const Chat = () => {
     error: modelsError,
   } = useQuery(queryClient.ai.models.queryOptions());
 
+  // Load conversations on mount
+  useEffect(() => {
+    const loadedConversations = getAllConversations();
+    setConversations(loadedConversations);
+    
+    const activeId = getActiveConversationId();
+    if (activeId && loadedConversations.some((c) => c.id === activeId)) {
+      setActiveConversationId(activeId);
+    }
+  }, []);
+
+  // Set default model
   useEffect(() => {
     if (models.length > 0 && !model) {
       const savedModel = localStorage.getItem("ai-chat-selected-model");
@@ -76,6 +105,7 @@ const Chat = () => {
     }
   }, [models, model]);
 
+  // Save selected model
   useEffect(() => {
     if (model) {
       localStorage.setItem("ai-chat-selected-model", model);
@@ -101,43 +131,189 @@ const Chat = () => {
       },
     },
   });
+
+  // Load active conversation messages
   useEffect(() => {
-    const savedMessages = localStorage.getItem("ai-chat-messages");
-    if (savedMessages) {
-      try {
-        const parsedMessages = JSON.parse(savedMessages);
-        setMessages(parsedMessages);
-      } catch (error) {
-        console.error("Failed to parse saved messages:", error);
-        localStorage.removeItem("ai-chat-messages");
+    if (activeConversationId) {
+      const conversation = getConversation(activeConversationId);
+      if (conversation) {
+        setMessages(conversation.messages);
+        setModel(conversation.model);
       }
     }
-  }, [setMessages]);
+  }, [activeConversationId, setMessages]);
+
+  // Save messages to active conversation
   useEffect(() => {
-    if (messages.length > 0) {
-      localStorage.setItem("ai-chat-messages", JSON.stringify(messages));
+    if (activeConversationId && messages.length > 0) {
+      const conversation = getConversation(activeConversationId);
+      if (conversation) {
+        // Update title from first user message if still "New Chat"
+        if (conversation.title === "New Chat" && messages.length > 0) {
+          const firstUserMessage = messages.find((m) => m.role === "user");
+          if (firstUserMessage) {
+            const textPart = firstUserMessage.parts.find((p: any) => p.type === "text");
+            if (textPart) {
+              conversation.title = generateChatTitle(textPart.text);
+            }
+          }
+        }
+        
+        conversation.messages = messages;
+        conversation.updatedAt = Date.now();
+        saveConversation(conversation);
+        setConversations(getAllConversations());
+      }
     }
-  }, [messages]);
+  }, [messages, activeConversationId]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (input.trim()) {
+    if (input.trim() || uploadedImages.length > 0) {
+      // Create new conversation if none active
+      if (!activeConversationId) {
+        const newConv = createNewConversation(model);
+        saveConversation(newConv);
+        setActiveConversationId(newConv.id);
+        setConversations(getAllConversations());
+      }
+
+      // Prepare message parts with images and text
+      const parts: any[] = [];
+      
+      // Add images first
+      if (uploadedImages.length > 0) {
+        uploadedImages.forEach((img) => {
+          parts.push({
+            type: "image",
+            image: img, // base64 data URL
+          });
+        });
+      }
+      
+      // Add text
+      if (input.trim()) {
+        parts.push({
+          type: "text",
+          text: input,
+        });
+      }
+
       sendMessage(
-        { text: input },
+        {
+          role: "user",
+          parts: parts,
+        },
         {
           body: {
             model: model,
           },
         }
       );
+      
       setInput("");
+      setUploadedImages([]);
     }
   };
 
   const handleNewChat = () => {
+    const newConv = createNewConversation(model);
+    saveConversation(newConv);
+    setActiveConversationId(newConv.id);
+    setConversations(getAllConversations());
     setMessages([]);
     setInput("");
-    localStorage.removeItem("ai-chat-messages");
+    setUploadedImages([]);
+    setSidebarOpen(false);
+  };
+
+  const handleSelectChat = (id: string) => {
+    setActiveConversationId(id);
+    setSidebarOpen(false);
+  };
+
+  const handleDeleteChat = (id: string) => {
+    deleteConversation(id);
+    setConversations(getAllConversations());
+    
+    if (activeConversationId === id) {
+      const remaining = getAllConversations();
+      if (remaining.length > 0) {
+        setActiveConversationId(remaining[0].id);
+      } else {
+        setActiveConversationId(null);
+        setMessages([]);
+      }
+    }
+  };
+
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files) return;
+
+    Array.from(files).forEach((file) => {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        if (event.target?.result) {
+          setUploadedImages((prev) => [...prev, event.target!.result as string]);
+        }
+      };
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const removeImage = (index: number) => {
+    setUploadedImages((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handlePaste = (e: React.ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    Array.from(items).forEach((item) => {
+      if (item.type.startsWith("image/")) {
+        const file = item.getAsFile();
+        if (file) {
+          const reader = new FileReader();
+          reader.onload = (event) => {
+            if (event.target?.result) {
+              setUploadedImages((prev) => [...prev, event.target!.result as string]);
+            }
+          };
+          reader.readAsDataURL(file);
+        }
+      }
+    });
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+
+    const files = e.dataTransfer?.files;
+    if (!files) return;
+
+    Array.from(files).forEach((file) => {
+      if (file.type.startsWith("image/")) {
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          if (event.target?.result) {
+            setUploadedImages((prev) => [...prev, event.target!.result as string]);
+          }
+        };
+        reader.readAsDataURL(file);
+      }
+    });
   };
 
   const handleDownloadChat = () => {
@@ -176,154 +352,256 @@ const Chat = () => {
   };
 
   return (
-    <div className="max-w-4xl mx-auto relative size-full h-screen flex flex-col">
-      <div className="sticky top-0 z-10 bg-background flex items-center justify-end p-6 pb-4">
-        <div className="flex items-center gap-2">
-          <Button
-            onClick={handleNewChat}
-            variant="ghost"
-            size="sm"
-            className="flex items-center gap-2"
-          >
-            <Plus className="h-4 w-4" />
-            New Chat
-          </Button>
+    <div className="h-screen overflow-hidden bg-background">
+      {/* Sidebar */}
+      <ChatSidebar
+        conversations={conversations}
+        activeId={activeConversationId}
+        onSelectChat={handleSelectChat}
+        onNewChat={handleNewChat}
+        onDeleteChat={handleDeleteChat}
+        isOpen={sidebarOpen}
+        onToggle={() => setSidebarOpen(!sidebarOpen)}
+      />
 
-          <TooltipProvider>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  onClick={handleDownloadChat}
-                  variant="ghost"
-                  size="sm"
-                  disabled={messages.length === 0}
+      {/* Main Chat Area */}
+      <main className="h-full flex flex-col overflow-hidden">
+        {/* Header Bar */}
+        <header className="h-16 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+          <div className="h-full max-w-[1600px] mx-auto px-6 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              {/* Model Selector */}
+              <Popover open={open} onOpenChange={setOpen}>
+                <PopoverTrigger asChild>
+                  <Button
+                    variant="outline"
+                    role="combobox"
+                    aria-expanded={open}
+                    className="w-[260px] justify-between h-10"
+                  >
+                    <span className="truncate">
+                      {model
+                        ? models.find((m) => m.value === model)?.label
+                        : "Select model..."}
+                    </span>
+                    <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-[260px] p-0">
+                  <Command>
+                    <CommandInput placeholder="Search model..." />
+                    <CommandList>
+                      <CommandEmpty>No model found.</CommandEmpty>
+                      <CommandGroup>
+                        {models.map((m) => (
+                          <CommandItem
+                            key={m.value}
+                            value={m.value}
+                            onSelect={(currentValue) => {
+                              setModel(currentValue);
+                              setOpen(false);
+                            }}
+                          >
+                            <Check
+                              className={cn(
+                                "mr-2 h-4 w-4",
+                                model === m.value ? "opacity-100" : "opacity-0"
+                              )}
+                            />
+                            {m.label}
+                          </CommandItem>
+                        ))}
+                      </CommandGroup>
+                    </CommandList>
+                  </Command>
+                </PopoverContent>
+              </Popover>
+            </div>
+
+            {/* Actions */}
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    onClick={handleDownloadChat}
+                    variant="ghost"
+                    size="icon"
+                    disabled={messages.length === 0}
+                    className="h-10 w-10"
+                  >
+                    <Download className="h-4 w-4" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  <p>Download conversation as Markdown</p>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          </div>
+        </header>
+
+        {/* Chat Content Area */}
+        <div className="flex-1 overflow-hidden">
+          <div className="h-full max-w-[1600px] mx-auto flex flex-col">
+            {messages.length === 0 ? (
+              // Welcome Screen
+              <div className="flex-1 flex items-center justify-center px-6">
+                <div className="text-center space-y-4 max-w-2xl">
+                  <h1 className="text-6xl font-bold tracking-tight">
+                    Hello.
+                  </h1>
+                  <p className="text-xl text-muted-foreground">
+                    How can I help you today?
+                  </p>
+                </div>
+              </div>
+            ) : (
+              // Messages Area
+              <Conversation className="flex-1">
+                <ConversationContent className="px-6">
+                  {messages.map((message) => (
+                    <Message from={message.role} key={message.id}>
+                      <MessageContent>
+                        {message.parts.map((part, i) => {
+                          switch (part.type) {
+                            case "image":
+                              return (
+                                <div key={`${message.id}-${i}`} className="mb-3">
+                                  <img
+                                    src={(part as any).image}
+                                    alt={`Image ${i + 1}`}
+                                    className="max-w-sm rounded-lg border shadow-sm"
+                                  />
+                                </div>
+                              );
+                            case "text":
+                              return (
+                                <Response key={`${message.id}-${i}`}>
+                                  {part.text}
+                                </Response>
+                              );
+                            case "reasoning":
+                              return (
+                                <Reasoning
+                                  key={`${message.id}-${i}`}
+                                  className="w-full"
+                                  isStreaming={status === "streaming"}
+                                >
+                                  <ReasoningTrigger />
+                                  <ReasoningContent>{part.text}</ReasoningContent>
+                                </Reasoning>
+                              );
+                            default:
+                              return null;
+                          }
+                        })}
+                      </MessageContent>
+                    </Message>
+                  ))}
+                  {status === "submitted" && <Loader />}
+                </ConversationContent>
+                <ConversationScrollButton />
+              </Conversation>
+            )}
+
+            {/* Input Area */}
+            <div className="px-6 py-6">
+              <div className="max-w-4xl mx-auto">
+                <PromptInput 
+                  onSubmit={handleSubmit} 
+                  className="shadow-xl transition-all"
                 >
-                  <Download className="h-4 w-4" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>
-                <p>Download conversation as markdown</p>
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
-        </div>
-      </div>
-      <div className="flex flex-col flex-1 px-6 pb-6 min-h-0">
-        {messages.length === 0 ? (
-          <div className="flex-1 flex items-center">
-            <div className="ml-8">
-              <div className="text-2xl font-semibold">Hello.</div>
-              <div className="text-2xl text-zinc-500">
-                How can I help you today?
+                  {/* Drag & Drop Overlay - Disabled */}
+                  
+                  {/* Image Preview */}
+                  {uploadedImages.length > 0 && (
+                    <div className="border-b bg-muted/30">
+                      {/* Vision Model Warning */}
+                      {model && !model.includes('gemini') && !model.includes('gpt-4') && !model.includes('vision') && !model.includes('claude') && (
+                        <div className="px-3 pt-3 pb-2">
+                          <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-3 text-sm">
+                            <p className="text-yellow-600 dark:text-yellow-500 font-medium">
+                              ⚠️ The selected model may not support images. For best results, use:
+                            </p>
+                            <ul className="text-yellow-600/80 dark:text-yellow-500/80 mt-1 text-xs list-disc list-inside">
+                              <li>Gemini models (all support vision)</li>
+                              <li>GPT-4o, GPT-4 Turbo, or GPT-4 Vision</li>
+                              <li>Claude 3 (Opus, Sonnet, Haiku)</li>
+                            </ul>
+                          </div>
+                        </div>
+                      )}
+                      
+                      <div className="flex gap-2 p-3 flex-wrap">
+                        {uploadedImages.map((img, index) => (
+                          <div key={index} className="relative group">
+                            <img
+                              src={img}
+                              alt={`Upload ${index + 1}`}
+                              className="h-24 w-24 object-cover rounded-lg border-2 shadow-sm"
+                            />
+                            <button
+                              onClick={() => removeImage(index)}
+                              className="absolute -top-2 -right-2 bg-destructive text-destructive-foreground rounded-full p-1.5 opacity-0 group-hover:opacity-100 transition-opacity shadow-lg hover:scale-110"
+                            >
+                              <X className="h-3 w-3" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  
+                  <PromptInputTextarea
+                    onChange={(e) => setInput(e.target.value)}
+                    value={input}
+                    placeholder="Type a message..."
+                    className="min-h-[80px] text-base"
+                  />
+                  
+                  <PromptInputToolbar>
+                    <PromptInputTools>
+                      {/* Image Upload Button - Disabled (Under Development) */}
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept="image/*"
+                        multiple
+                        className="hidden"
+                        onChange={handleImageUpload}
+                        disabled
+                      />
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              disabled
+                              className="h-10 w-10 opacity-50 cursor-not-allowed"
+                            >
+                              <ImagePlus className="h-5 w-5" />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            <p>🚧 قيد التطوير - Under Development</p>
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    </PromptInputTools>
+                    <PromptInputSubmit 
+                      disabled={!input.trim()} 
+                      status={status}
+                      className="h-10 w-10"
+                    />
+                  </PromptInputToolbar>
+                </PromptInput>
               </div>
             </div>
           </div>
-        ) : (
-          <Conversation className="h-full">
-            <ConversationContent>
-              {messages.map((message) => (
-                <div key={message.id}>
-                  <Message from={message.role} key={message.id}>
-                    <MessageContent>
-                      {message.parts.map((part, i) => {
-                        switch (part.type) {
-                          case "text":
-                            return (
-                              <Response key={`${message.id}-${i}`}>
-                                {part.text}
-                              </Response>
-                            );
-                          case "reasoning":
-                            return (
-                              <Reasoning
-                                key={`${message.id}-${i}`}
-                                className="w-full"
-                                isStreaming={status === "streaming"}
-                              >
-                                <ReasoningTrigger />
-                                <ReasoningContent>{part.text}</ReasoningContent>
-                              </Reasoning>
-                            );
-                          default:
-                            return null;
-                        }
-                      })}
-                    </MessageContent>
-                  </Message>
-                </div>
-              ))}
-              {status === "submitted" && <Loader />}
-            </ConversationContent>
-            <ConversationScrollButton />
-          </Conversation>
-        )}
-
-        <PromptInput onSubmit={handleSubmit} className="mt-4">
-          <PromptInputTextarea
-            onChange={(e) => setInput(e.target.value)}
-            value={input}
-          />
-          <PromptInputToolbar>
-            <PromptInputTools>
-              {!isLoadingModels && !modelsError && models.length > 0 && (
-                <Popover open={open} onOpenChange={setOpen}>
-                  <PopoverTrigger asChild>
-                    <Button
-                      variant="outline"
-                      role="combobox"
-                      aria-expanded={open}
-                      className="justify-between text-left font-normal"
-                    >
-                      <span>
-                        {model
-                          ? models.find((m) => m.value === model)?.name
-                          : "Select model..."}
-                      </span>
-                      <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-                    </Button>
-                  </PopoverTrigger>
-                  <PopoverContent className="w-auto p-0">
-                    <Command>
-                      <CommandInput
-                        placeholder="Search models..."
-                        className="h-9"
-                      />
-                      <CommandList>
-                        <CommandEmpty>No model found.</CommandEmpty>
-                        <CommandGroup>
-                          {models.map((modelOption) => (
-                            <CommandItem
-                              key={modelOption.value}
-                              value={modelOption.value}
-                              onSelect={(currentValue) => {
-                                setModel(
-                                  currentValue === model ? "" : currentValue
-                                );
-                                setOpen(false);
-                              }}
-                            >
-                              {modelOption.name}
-                              <Check
-                                className={cn(
-                                  "ml-auto",
-                                  model === modelOption.value
-                                    ? "opacity-100"
-                                    : "opacity-0"
-                                )}
-                              />
-                            </CommandItem>
-                          ))}
-                        </CommandGroup>
-                      </CommandList>
-                    </Command>
-                  </PopoverContent>
-                </Popover>
-              )}
-            </PromptInputTools>
-            <PromptInputSubmit disabled={!input} status={status} />
-          </PromptInputToolbar>
-        </PromptInput>
-      </div>
+        </div>
+      </main>
     </div>
   );
 };
