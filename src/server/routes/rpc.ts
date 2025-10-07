@@ -1,11 +1,11 @@
 import { RPCHandler } from "@orpc/server/fetch";
 
-import { router } from "../rpc";
+import { rpc } from "../rpc";
 import { Hono } from "hono";
 
 export const rpcApp = new Hono();
 
-const handler = new RPCHandler(router);
+const handler = new RPCHandler(rpc);
 
 rpcApp.all("/*", async (c) => {
   const { matched, response } = await handler.handle(c.req.raw, {
